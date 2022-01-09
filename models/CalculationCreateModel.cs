@@ -1,6 +1,7 @@
 ﻿using System.Collections.Generic;
+using Newtonsoft.Json;
 
-namespace acPlt.models
+namespace PluginMatrixCalculation.models
 {
     public class CalculationCreateModel
     {
@@ -11,8 +12,7 @@ namespace acPlt.models
         public List<string> TowersNumbers { get; set; }
         public List<string> CalculationPoints { get; set; }
 
-        public CalculationCreateModel() { }
-        
+        [JsonConstructor]
         public CalculationCreateModel(
             List<List<int>> networkTopology, 
             List<ComplexNumber> branchResistances, 
