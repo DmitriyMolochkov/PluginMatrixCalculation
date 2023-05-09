@@ -13,16 +13,232 @@ using Autodesk.AutoCAD.Geometry;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using PluginMatrixCalculation.models;
+using System.Linq;
 using AcAp = Autodesk.AutoCAD.ApplicationServices.Application;
-
-
+using PluginMatrixCalculation.models.Wires;
+using MathNet.Numerics.LinearAlgebra;
+using Complex64 = System.Numerics.Complex;
 
 namespace PluginMatrixCalculation
 {
     public class Commands : IExtensionApplication
     {
-        private long _calculationId;
-        
+        private string _calculationId = null;
+
+        [CommandMethod("selb")]
+        public CalculationCreateModel getCalculationCreateModel()
+        {
+            List<WireSpan> wireSpans = new List<WireSpan>();
+            List<Consumer> consumers = new List<Consumer>();
+            List<Pole> poles = new List<Pole>();
+
+            Editor ed = Application.DocumentManager.MdiActiveDocument.Editor;
+            Database db = Application.DocumentManager.MdiActiveDocument.Database;
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                // получаем таблицу блоков и проходим по всем записям таблицы блоков
+                BlockTable bt = trans.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
+                foreach (ObjectId btrId in bt)
+                {
+                    // получаем запись таблицы блоков и смотри анонимная ли она
+                    BlockTableRecord btr = trans.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord;
+                    if (btr.IsDynamicBlock)
+                    {
+                        // получаем все анонимные блоки динамического блока
+                        ObjectIdCollection anonymousIds = btr.GetAnonymousBlockIds();
+                        // получаем все прямые вставки динамического блока
+                        ObjectIdCollection dynBlockRefs = btr.GetBlockReferenceIds(true, true);
+                        foreach (ObjectId anonymousBtrId in anonymousIds)
+                        {
+                            // получаем анонимный блок
+                            BlockTableRecord anonymousBtr = trans.GetObject(anonymousBtrId, OpenMode.ForRead) as BlockTableRecord;
+                            // получаем все вставки этого блока
+                            ObjectIdCollection blockRefIds = anonymousBtr.GetBlockReferenceIds(true, true);
+                            foreach (ObjectId id in blockRefIds)
+                            {
+                                dynBlockRefs.Add(id);
+                            }
+                        }
+
+                        foreach (ObjectId id in dynBlockRefs)
+                        {
+                            BlockReference bref = trans.GetObject(id, OpenMode.ForRead) as BlockReference;
+
+                            if (bref.IsDynamicBlock)
+                            {
+                                List<DynamicBlockReferenceProperty> props = new List<DynamicBlockReferenceProperty>();
+                                foreach (DynamicBlockReferenceProperty prop in bref.DynamicBlockReferencePropertyCollection)
+                                {
+                                    props.Add(prop);
+                                }
+
+                                Point firstPoint = new Point(bref.Position.X, bref.Position.Y);
+                                if (btr.Name == "Пролет")
+                                {
+                                    Point secondPoint = firstPoint + new Point(
+                                        (double)props.First(p => p.PropertyName == "Положение1 X").Value,
+                                        (double)props.First(p => p.PropertyName == "Положение1 Y").Value
+                                    );
+                                    string wireType = props.First(p => p.PropertyName == "Марка провода").Value as string;
+                                    int length = Convert.ToInt32(Math.Round((double)props.First(p => p.PropertyName == "Длина пролета").Value));
+                                    wireSpans.Add(
+                                        new WireSpan(
+                                            firstPoint,
+                                            secondPoint,
+                                            СИП_2.Values.First(c => c.Name == wireType),
+                                            length
+                                        )
+                                    );
+                                }
+                                else if (btr.Name == "Опора")
+                                {
+                                    List<AttributeReference> attrs = new List<AttributeReference>();
+                                    foreach (ObjectId propId in bref.AttributeCollection)
+                                    {
+                                        attrs.Add(trans.GetObject(propId, OpenMode.ForRead) as AttributeReference);
+                                    }
+
+                                    string poleNumber = attrs.First(a => a.Tag == "НОМЕР_ОПОРЫ").TextString;
+
+                                    poles.Add(new Pole(firstPoint, poleNumber));
+                                }
+                                else if (btr.Name == "Абонент")
+                                {
+                                    string consumerName = props.First(p => p.PropertyName == "Марка провода").Value as string;
+                                    consumers.Add(new Consumer(firstPoint, ConsumerType.Values.First(c => c.Name == consumerName)));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                MatrixBuilder<double> MComplex = Matrix<double>.Build;
+
+                var COM = MComplex.DenseOfArray(new double[,]  {{-1,  0,   0,   0}, //Матрица соеднинения звена
+                                                                { 0,  0,   0,   1},
+                                                                { 0, -1,   0,   0},
+                                                                { 0,  0,  -1,   0}});
+
+
+                var CON = MComplex.DenseOfArray(new double[,]  {{ 1,  0,  0},       //Матрица потребителя звена
+                                                                {-1, -1, -1},
+                                                                { 0,  1,  0},
+                                                                { 0,  0,  1}});
+
+
+                int ElementsCount = wireSpans.Count;
+                Matrix<double> MConnection = MComplex.Dense(ElementsCount * 4 + 3, ElementsCount * 7 + 3);
+                MConnection.SetSubMatrix(0, 3, 0, 3, MComplex.DenseDiagonal(3, 3, -1));
+                int u = 0;
+                int v = 4;
+                var qwe = new { Name = "Abhimanyu", Age = 21 };
+                List<WireSpan> wireSpansCopy = new List<WireSpan>(wireSpans);
+                Dictionary<WireSpan, (int, Pole)> topology = new Dictionary<WireSpan, (int, Pole)>();
+                while (wireSpansCopy.Count > 0)
+                {
+                    u = u + 1;
+
+                    WireSpan currentWireSpan;
+                    if (topology.Count == 0)
+                    {
+                        MConnection.SetSubMatrix(0, 3, v - 1, 3, -MComplex.DenseDiagonal(3, 3, -1));
+                        currentWireSpan = wireSpansCopy.First(ws => poles.All(p => p.Point != ws.Start));
+                    } else
+                    {
+                        currentWireSpan = wireSpansCopy.First(ws => topology.Keys.Any(k => k.End == ws.Start));
+                        WireSpan key = topology.Keys.First(k => k.End == currentWireSpan.Start);
+                        (int uForConnect, _) = topology[key];
+                        MConnection.SetSubMatrix(uForConnect * 4 - 1, 4, v - 1, 4, -COM);
+                    }
+
+                    Pole pole = poles.First(p => p.Point == currentWireSpan.End);
+                    topology.Add(currentWireSpan, (u, pole));
+                    wireSpansCopy.Remove(currentWireSpan);
+
+                    MConnection.SetSubMatrix(u * 4 - 1, 4, v - 1, 4, COM);
+                    v = v + 4;
+                    MConnection.SetSubMatrix(u * 4 - 1, 4, v - 1, 3, CON);
+                    v = v + 3;
+                }
+
+                List<WireSpan> wireEndSpans = wireSpans.Where(ws => wireSpans.All(x => ws.End != x.Start)).ToList();
+                List<Pole> polesToCalculate = poles.Where(p => wireEndSpans.Any(ws => ws.End == p.Point)).ToList();
+
+                List<List<int>> networkTopology =
+                    MConnection.ToRowArrays().Select(x => x.Select(y => Convert.ToInt32(y)).ToList()).ToList();
+
+                List<Complex64> branchResistances = new List<Complex64>
+                {
+                    new Complex64(0.00947, 0.0272),
+                    new Complex64(0.00947, 0.0272),
+                    new Complex64(0.00947, 0.0272),
+                };
+
+                List<Complex64> accumPowerByPhase = Enumerable.Range(1, 3).Select(_ => new Complex64()).ToList();
+
+                foreach (WireSpan wireSpan in topology.Keys)
+				{
+                    branchResistances.AddRange(Enumerable.Range(1, 3).Select(_ => wireSpan.Wire.PhaseWireResistivity.ToComplex64() * wireSpan.Length / 1000));
+                    branchResistances.Add(wireSpan.Wire.NeutralWireResistivity.ToComplex64() * wireSpan.Length / 1000);
+
+                    List<Consumer> consumersOfWireSpan = consumers.Where(c => c.Point == wireSpan.End).ToList();
+
+                    Complex64 accumPowerOfPhaseA = new Complex64();
+                    Complex64 accumPowerOfPhaseB = new Complex64();
+                    Complex64 accumPowerOfPhaseC = new Complex64();
+                    foreach (Consumer consumer in consumersOfWireSpan)
+					{
+                        Complex64 currPower = consumer.ConsumerType.Power.ToComplex64();
+                        if (consumer.ConsumerType.IsThreePhase)
+						{
+                            accumPowerByPhase = accumPowerByPhase.Select(p => p + currPower).ToList();
+                            accumPowerOfPhaseA = accumPowerOfPhaseA + currPower;
+                            accumPowerOfPhaseB = accumPowerOfPhaseB + currPower;
+                            accumPowerOfPhaseC = accumPowerOfPhaseC + currPower;
+                        } else
+						{
+                            double powerOfCurrentPhase = accumPowerByPhase.Select(p => p.Magnitude).Min();
+                            int index = accumPowerByPhase.FindIndex(p => p.Magnitude == powerOfCurrentPhase);
+                            accumPowerByPhase[index] = powerOfCurrentPhase + currPower;
+                            if (index == 0)
+							{
+                                accumPowerOfPhaseA = accumPowerOfPhaseA + currPower;
+                            } else if (index == 1)
+							{
+                                accumPowerOfPhaseB = accumPowerOfPhaseB + currPower;
+                            }
+                            else if (index == 2)
+                            {
+                                accumPowerOfPhaseC = accumPowerOfPhaseC + currPower;
+                            }
+                        }
+                    }
+
+                    branchResistances.Add(accumPowerOfPhaseA.Magnitude != 0 ? Complex64.Pow(230.94011, 2) / accumPowerOfPhaseA : Math.Pow(10, 7));
+                    branchResistances.Add(accumPowerOfPhaseB.Magnitude != 0 ? Complex64.Pow(230.94011, 2) / accumPowerOfPhaseB : Math.Pow(10, 7));
+                    branchResistances.Add(accumPowerOfPhaseC.Magnitude != 0 ? Complex64.Pow(230.94011, 2) / accumPowerOfPhaseC : Math.Pow(10, 7));
+
+                }
+
+                List<ComplexNumber> branchEVMs = new List<ComplexNumber>
+                {
+                    new ComplexNumber(230.94011, 0),
+                    new ComplexNumber(-115.47005, -200.00000),
+                    new ComplexNumber(-115.47005, 200.00000),
+                };
+                branchEVMs.AddRange(Enumerable.Range(1, networkTopology[0].Count - 3).Select(_ => new ComplexNumber(0, 0)));
+
+                return new CalculationCreateModel(
+                    networkTopology,
+                    branchResistances.Select(br => new ComplexNumber(br)).ToList(),
+                    branchEVMs,
+                    Enumerable.Range(1, networkTopology[0].Count).Select(_ => new ComplexNumber(0, 0)).ToList(),
+                    topology.Values.Select(value => value.Item2.Number).ToList(),
+                    polesToCalculate.Select(p => p.Number).ToList()
+                );
+            }
+        }
+
         [CommandMethod("MakeCalculation")]
         public void MakeCalculation()
         {
@@ -35,31 +251,30 @@ namespace PluginMatrixCalculation
                 
                 HttpClient client = new HttpClient();
 
-                var model = new CalculationCreateModel(
-                    _networkTopology, 
-                    _branchResistances, 
-                    _branchEVMs, 
-                    _branchCurrentSources, 
-                    _towersNumbers, 
-                    _calculationPoints);
-
                 var jsonSerializerSettings = new JsonSerializerSettings();
                 jsonSerializerSettings.ContractResolver = new CamelCasePropertyNamesContractResolver();
-                string requestString = JsonConvert.SerializeObject(model, jsonSerializerSettings);
+                string requestString = JsonConvert.SerializeObject(getCalculationCreateModel(), jsonSerializerSettings);
                 
                 var stringContent = new StringContent(requestString, Encoding.UTF8, "application/json");
                 
                 var response = client.PostAsync("http://localhost:8080/api/calculation", stringContent).Result;
                 var responseString = response.Content.ReadAsStringAsync().Result;
 
-                CalculationResultsModel results = 
+                CalculationResultsModel results = null;
+                try
+				{
+                    results =
                     JsonConvert.DeserializeObject<CalculationResultsModel>(responseString, jsonSerializerSettings);
 
-                _calculationId = results.CalculationId;
-                
-                CreateResultTables(db, ed, results);
+                    _calculationId = results.CalculationId;
 
-                ed.WriteMessage("\nРасчёт параметров электрической сети выполнен");
+                    CreateResultTables(db, ed, results);
+
+                    ed.WriteMessage("\nРасчёт параметров электрической сети выполнен");
+                } catch (System.Exception error)
+				{
+                    Console.WriteLine(error);
+				}
             }
             catch (System.Exception e)
             {
@@ -80,7 +295,7 @@ namespace PluginMatrixCalculation
             Editor ed = AcAp.DocumentManager.MdiActiveDocument.Editor;
             try
             {
-                if (_calculationId == 0)
+                if (_calculationId == null)
                 {
                     ed.WriteMessage("Для проверки параметров электрической сети необходимо произвести расчёт");
                     return;

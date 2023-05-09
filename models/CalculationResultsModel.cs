@@ -5,7 +5,7 @@ namespace PluginMatrixCalculation.models
 {
     public class CalculationResultsModel
     {
-        public long CalculationId { get; set; }
+        public string CalculationId { get; set; }
         public List<ComplexNumber> BranchesVoltage { get; set; }
         public List<ComplexNumber> BranchesCurrents { get; set; }
         public CalculationResultForCTS ResultFotCTS { get; set; }

@@ -12,7 +12,7 @@ namespace PluginMatrixCalculation.models
         public ComplexNumber VoltagePhaseC { get; set; }
 
         public double MaxVoltageLoss =>
-            (230 - new List<ComplexNumber> { VoltagePhaseA, VoltagePhaseB, VoltagePhaseC }.Min(x => x.Abs)) / 230 * 100;
+            (230.94011 - new List<ComplexNumber> { VoltagePhaseA, VoltagePhaseB, VoltagePhaseC }.Min(x => x.Abs)) / 230.94011 * 100;
 
         [JsonConstructor]
         public CalculationResultForTower(
